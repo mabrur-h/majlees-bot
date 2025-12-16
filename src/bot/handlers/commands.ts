@@ -24,7 +24,7 @@ const IMAGES_DIR = path.join(process.cwd(), "public", "images");
 const WEB_APP_URL = "https://watertight-unpiratically-milagros.ngrok-free.dev";
 
 // Single hero image for onboarding - cleaner UX
-const ONBOARDING_IMAGE = "slide1.png";
+const ONBOARDING_IMAGE = "slide1.PNG";
 const ONBOARDING_CAPTION =
   "🎯 *2 soatlik majlis → 2 daqiqada xulosa*\n\n" +
   "✅ O'zbek, rus, ingliz tillarida transkriptsiya\n" +
