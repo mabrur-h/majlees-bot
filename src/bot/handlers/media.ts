@@ -2,6 +2,7 @@ import { InlineKeyboard } from "grammy";
 import type { BotContext, PendingMedia } from "../context.js";
 import { uploadService } from "../../api/upload.js";
 import { checkMinutesForUpload } from "./balance.js";
+import { config } from "../../config.js";
 
 // Track media group IDs to avoid duplicate messages
 const handledMediaGroups = new Map<string, number>();
@@ -49,14 +50,16 @@ export async function handleMedia(ctx: BotContext): Promise<void> {
   }
 
   // Check if there's a pending media waiting for type selection
+  // If so, replace it with the new file (better UX than blocking)
   if (ctx.session.pendingMedia) {
+    // Notify user that we're replacing the old file
     await ctx.reply(
-      "📁 *Oldingi fayl kutilmoqda*\n\n" +
-      "Siz allaqachon bitta fayl yuborgansiz.\n" +
-      "Iltimos, avval uning turini tanlang yoki yangi fayl yuborish uchun kuting.",
+      "🔄 *Yangi fayl qabul qilindi*\n\n" +
+      "Oldingi fayl o'rniga yangi fayl qayta ishlanadi.",
       { parse_mode: "Markdown" }
     );
-    return;
+    // Clear the old pending media (will be replaced below)
+    ctx.session.pendingMedia = undefined;
   }
 
   const messageId = message.message_id;
@@ -96,6 +99,27 @@ export async function handleMedia(ctx: BotContext): Promise<void> {
 
   if (!fileId) {
     await ctx.reply("Bu media faylni qayta ishlab bo'lmadi.");
+    return;
+  }
+
+  // Check file size - Cloud API has 20MB limit, Local API has 2GB limit
+  if (fileSize && fileSize > config.maxFileSize) {
+    const fileSizeMB = (fileSize / 1024 / 1024).toFixed(1);
+    const maxSizeMB = Math.round(config.maxFileSize / 1024 / 1024);
+    const keyboard = new InlineKeyboard()
+      .webApp("🌐 Web ilovani ochish", config.webAppUrl);
+
+    await ctx.reply(
+      `📁 *Fayl juda katta*\n\n` +
+        `📊 Fayl hajmi: ${fileSizeMB} MB\n` +
+        `⚠️ Telegram orqali maksimum ${maxSizeMB} MB gacha fayl yuklash mumkin.\n\n` +
+        `Katta fayllarni yuklash uchun web ilovadan foydalaning:`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: keyboard,
+        reply_parameters: { message_id: messageId },
+      }
+    );
     return;
   }
 
@@ -180,7 +204,7 @@ export async function handleTypeSelection(ctx: BotContext): Promise<void> {
   ctx.session.isUploading = true;
   ctx.session.pendingMedia = undefined;
 
-  // Step 1: Downloading from Telegram
+  // Step 1: Getting file from Telegram
   await ctx.editMessageText(`${typeName}\n\n⏳ Yuklab olinmoqda... (1/3)`);
 
   try {
@@ -189,21 +213,34 @@ export async function handleTypeSelection(ctx: BotContext): Promise<void> {
       throw new Error("Fayl yo'lini olib bo'lmadi");
     }
 
-    const fileUrl = "https://api.telegram.org/file/bot" + ctx.api.token + "/" + file.file_path;
-
     // Step 2: Uploading to server
     await ctx.editMessageText(`${typeName}\n\n📤 Serverga yuklanmoqda... (2/3)`);
 
-    const result = await uploadService.uploadFromUrl(
-      ctx.session.tokens.accessToken,
-      fileUrl,
-      {
-        filename: pendingMedia.fileName || "upload_" + Date.now(),
-        mimeType: pendingMedia.mimeType || "application/octet-stream",
-        language: "uz",
-        summarizationType: summarizationType,
-      }
-    );
+    let result;
+    const uploadOptions = {
+      filename: pendingMedia.fileName || "upload_" + Date.now(),
+      mimeType: pendingMedia.mimeType || "application/octet-stream",
+      language: "uz",
+      summarizationType: summarizationType as "lecture" | "custdev",
+    };
+
+    if (config.useLocalBotApi) {
+      // Local Bot API returns a local file path
+      // The file is stored locally by telegram-bot-api server
+      result = await uploadService.uploadFromLocalPath(
+        ctx.session.tokens.accessToken,
+        file.file_path,
+        uploadOptions
+      );
+    } else {
+      // Cloud API - construct URL to download file
+      const fileUrl = "https://api.telegram.org/file/bot" + ctx.api.token + "/" + file.file_path;
+      result = await uploadService.uploadFromUrl(
+        ctx.session.tokens.accessToken,
+        fileUrl,
+        uploadOptions
+      );
+    }
 
     if (result.success && result.lectureId) {
       // Step 3: Success
@@ -228,13 +265,34 @@ export async function handleTypeSelection(ctx: BotContext): Promise<void> {
     }
   } catch (error) {
     console.error("Upload error:", error);
-    await ctx.editMessageText(
-      `${typeName}\n\n` +
-        `❌ *Xatolik yuz berdi*\n\n` +
-        `Iltimos, qaytadan urinib ko'ring.\n` +
-        `Muammo davom etsa, /start buyrug'ini yuboring.`,
-      { parse_mode: "Markdown" }
-    );
+
+    // Check if it's a "file is too big" error from Telegram
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isFileTooLarge = errorMessage.includes("file is too big") || errorMessage.includes("file_too_big");
+
+    if (isFileTooLarge) {
+      const keyboard = new InlineKeyboard()
+        .webApp("🌐 Web ilovani ochish", config.webAppUrl);
+
+      await ctx.editMessageText(
+        `${typeName}\n\n` +
+          `📁 *Fayl juda katta*\n\n` +
+          `⚠️ Telegram orqali maksimum 20 MB gacha fayl yuklash mumkin.\n\n` +
+          `Katta fayllarni yuklash uchun web ilovadan foydalaning:`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: keyboard,
+        }
+      );
+    } else {
+      await ctx.editMessageText(
+        `${typeName}\n\n` +
+          `❌ *Xatolik yuz berdi*\n\n` +
+          `Iltimos, qaytadan urinib ko'ring.\n` +
+          `Muammo davom etsa, /start buyrug'ini yuboring.`,
+        { parse_mode: "Markdown" }
+      );
+    }
   } finally {
     // Always clear the uploading flag when done
     ctx.session.isUploading = false;

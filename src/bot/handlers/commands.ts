@@ -1,6 +1,12 @@
 import { InputFile, InlineKeyboard, Keyboard } from "grammy";
 import path from "path";
 import type { BotContext } from "../context.js";
+import { config } from "../../config.js";
+import {
+  handleAccountLink,
+  isAccountLinkToken,
+  extractLinkToken,
+} from "./accountLinking.js";
 
 // Button text constants for text buttons
 export const BUTTON_TRANSCRIBE = "🎬 Transkriptsiya";
@@ -21,16 +27,17 @@ export function getMainReplyKeyboard(): Keyboard {
 }
 
 const IMAGES_DIR = path.join(process.cwd(), "public", "images");
-const WEB_APP_URL = "https://watertight-unpiratically-milagros.ngrok-free.dev";
+const WEB_APP_URL = config.webAppUrl;
 
-// Single hero image for onboarding - cleaner UX
-const ONBOARDING_IMAGE = "slide1.PNG";
-const ONBOARDING_CAPTION =
+// Onboarding slides
+const SLIDE1_CAPTION =
   "🎯 *2 soatlik majlis → 2 daqiqada xulosa*\n\n" +
   "✅ O'zbek, rus, ingliz tillarida transkriptsiya\n" +
   "✅ AI xulosa va asosiy fikrlar\n" +
-  "✅ CustDev intervyu tahlili\n\n" +
-  "📤 *Shunchaki video yuboring — qolganini biz qilamiz!*";
+  "✅ CustDev intervyu tahlili";
+
+const SLIDE2_CAPTION =
+  "📤 *Shunchaki video yoki audio yuboring — qolganini biz qilamiz!*";
 
 /**
  * Create main menu keyboard
@@ -42,11 +49,21 @@ function getMainMenuKeyboard(): InlineKeyboard {
     .text("📊 Balans", "show_balance")
     .text("📦 Tariflar", "show_plans")
     .row()
+    .text("ℹ️ Qo'llanma", "show_info")
+    .text("⚙️ Sozlamalar", "show_settings")
+    .row()
     .webApp("🌐 Web ilovani ochish", WEB_APP_URL);
 }
 
 export async function handleStart(ctx: BotContext): Promise<void> {
   const startParam = ctx.match as string | undefined;
+
+  // Handle account linking deep link - e.g., t.me/bot?start=link_{token}
+  if (startParam && isAccountLinkToken(startParam)) {
+    const linkToken = extractLinkToken(startParam);
+    await handleAccountLink(ctx, linkToken);
+    return;
+  }
 
   // Handle deep links - e.g., t.me/bot?start=lecture_123
   if (startParam?.startsWith("lecture_")) {
@@ -60,13 +77,20 @@ export async function handleStart(ctx: BotContext): Promise<void> {
     return;
   }
 
-  // Single hero image with value proposition + inline buttons
-  const imagePath = path.join(IMAGES_DIR, ONBOARDING_IMAGE);
+  // Send slide 1 with intro info
+  const slide1Path = path.join(IMAGES_DIR, "slide1.png");
+  const slide1Message = await ctx.replyWithPhoto(new InputFile(slide1Path), {
+    caption: SLIDE1_CAPTION,
+    parse_mode: "Markdown",
+  });
 
-  await ctx.replyWithPhoto(new InputFile(imagePath), {
-    caption: ONBOARDING_CAPTION,
+  // Send slide 2 with CTA and inline keyboard, replying to slide 1
+  const slide2Path = path.join(IMAGES_DIR, "slide2.png");
+  await ctx.replyWithPhoto(new InputFile(slide2Path), {
+    caption: SLIDE2_CAPTION,
     parse_mode: "Markdown",
     reply_markup: getMainMenuKeyboard(),
+    reply_parameters: { message_id: slide1Message.message_id },
   });
 }
 

@@ -12,6 +12,9 @@ import type {
   BalanceResponse,
   ActivatePlanResponse,
   PurchasePackageResponse,
+  CompleteTelegramLinkPayload,
+  AccountLinkResponse,
+  LinkedAccountsStatusResponse,
 } from "./types.js";
 
 class ApiClient {
@@ -172,6 +175,25 @@ class ApiClient {
         method: "POST",
         body: JSON.stringify({ packageName }),
       }
+    );
+  }
+
+  // Account Linking endpoints
+  async completeTelegramLink(
+    payload: CompleteTelegramLinkPayload
+  ): Promise<ApiResponse<AccountLinkResponse>> {
+    return this.request<AccountLinkResponse>("/api/v1/auth/link/telegram/complete", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getLinkedAccountsStatus(
+    accessToken: string
+  ): Promise<ApiResponse<LinkedAccountsStatusResponse>> {
+    return this.authenticatedRequest<LinkedAccountsStatusResponse>(
+      "/api/v1/auth/link/status",
+      accessToken
     );
   }
 }

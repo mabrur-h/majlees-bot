@@ -171,3 +171,44 @@ export interface PurchasePackageResponse {
   message: string;
   requiresPayment: boolean;
 }
+
+// Account Linking types
+export interface CompleteTelegramLinkPayload {
+  token: string;
+  telegramId: number;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+  languageCode?: string;
+  isPremium?: boolean;
+  photoUrl?: string | null;
+}
+
+export interface AccountLinkResponse {
+  user: User;
+  merged: boolean;
+  message: string;
+}
+
+// Linked Accounts Status types
+export interface LinkedAccountStatus {
+  google: {
+    linked: boolean;
+    email?: string | null;
+  };
+  telegram: {
+    linked: boolean;
+    username?: string | null;
+  };
+}
+
+export interface LinkedAccountsStatusResponse {
+  google: {
+    linked: boolean;
+    email?: string | null;
+  };
+  telegram: {
+    linked: boolean;
+    username?: string | null;
+  };
+}

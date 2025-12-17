@@ -3,7 +3,7 @@ import path from "path";
 import type { BotContext } from "../context.js";
 import { apiClient } from "../../api/client.js";
 
-const PRICING_IMAGE_PATH = path.join(process.cwd(), "public", "images", "pricing_plans.jpg");
+const PRICING_IMAGE_PATH = path.join(process.cwd(), "public", "images", "pricing_plans.png");
 
 // Format price with thousand separators
 function formatPrice(price: number): string {
@@ -276,6 +276,15 @@ export async function handleBuyPlan(ctx: BotContext): Promise<void> {
       planName
     );
 
+    // Check if user no longer exists (deleted after account merge)
+    if (response.error?.code === "USER_NOT_FOUND") {
+      ctx.session.isAuthenticated = false;
+      ctx.session.tokens = undefined;
+      ctx.session.user = undefined;
+      await ctx.answerCallbackQuery("Sizning sessiyangiz yaroqsiz. Iltimos, /start buyrug'ini yuboring.");
+      return;
+    }
+
     if (response.success && response.data) {
       // Check if payment is required
       if (response.data.requiresPayment && response.data.paymentUrl) {
@@ -351,6 +360,15 @@ export async function handleBuyPackage(ctx: BotContext): Promise<void> {
       ctx.session.tokens.accessToken,
       packageName
     );
+
+    // Check if user no longer exists (deleted after account merge)
+    if (response.error?.code === "USER_NOT_FOUND") {
+      ctx.session.isAuthenticated = false;
+      ctx.session.tokens = undefined;
+      ctx.session.user = undefined;
+      await ctx.answerCallbackQuery("Sizning sessiyangiz yaroqsiz. Iltimos, /start buyrug'ini yuboring.");
+      return;
+    }
 
     if (response.success && response.data) {
       // Check if payment is required (it always is for packages)

@@ -62,11 +62,31 @@ async function showBalance(ctx: BotContext, isCallback: boolean): Promise<void> 
     const response = await apiClient.getBalance(ctx.session.tokens.accessToken);
 
     if (!response.success || !response.data) {
-      const message = "❌ Balansni olishda xatolik yuz berdi.";
+      // Check if user no longer exists (deleted after account merge)
+      if (response.error?.code === "USER_NOT_FOUND") {
+        // Clear session and prompt re-authentication
+        ctx.session.isAuthenticated = false;
+        ctx.session.tokens = undefined;
+        ctx.session.user = undefined;
+
+        const message = "Sizning sessiyangiz yaroqsiz. Iltimos, /start buyrug'ini yuboring.";
+        if (isCallback) {
+          await ctx.answerCallbackQuery(message);
+        } else {
+          await ctx.reply(message);
+        }
+        return;
+      }
+
+      const errorMessage = "❌ Balansni olishda xatolik yuz berdi.";
       if (isCallback) {
-        await ctx.editMessageText(message);
+        try {
+          await ctx.editMessageText(errorMessage);
+        } catch {
+          await ctx.reply(errorMessage);
+        }
       } else {
-        await ctx.reply(message);
+        await ctx.reply(errorMessage);
       }
       return;
     }
@@ -95,10 +115,29 @@ async function showBalance(ctx: BotContext, isCallback: boolean): Promise<void> 
       .text("➕ Daqiqa sotib olish", "packages_menu");
 
     if (isCallback) {
-      await ctx.editMessageText(message, {
-        parse_mode: "Markdown",
-        reply_markup: keyboard,
-      });
+      // Check if current message is a photo (has caption) or text message
+      const callbackMsg = ctx.callbackQuery?.message;
+      const isPhotoMessage = callbackMsg && "photo" in callbackMsg && callbackMsg.photo;
+
+      if (isPhotoMessage) {
+        // Can't edit photo to text, send new message instead
+        await ctx.reply(message, {
+          parse_mode: "Markdown",
+          reply_markup: keyboard,
+        });
+      } else {
+        try {
+          await ctx.editMessageText(message, {
+            parse_mode: "Markdown",
+            reply_markup: keyboard,
+          });
+        } catch {
+          await ctx.reply(message, {
+            parse_mode: "Markdown",
+            reply_markup: keyboard,
+          });
+        }
+      }
     } else {
       await ctx.reply(message, {
         parse_mode: "Markdown",
@@ -107,11 +146,15 @@ async function showBalance(ctx: BotContext, isCallback: boolean): Promise<void> 
     }
   } catch (error) {
     console.error("Error fetching balance:", error);
-    const message = "❌ Balansni olishda xatolik yuz berdi.";
+    const errorMessage = "❌ Balansni olishda xatolik yuz berdi.";
     if (isCallback) {
-      await ctx.editMessageText(message);
+      try {
+        await ctx.editMessageText(errorMessage);
+      } catch {
+        await ctx.reply(errorMessage);
+      }
     } else {
-      await ctx.reply(message);
+      await ctx.reply(errorMessage);
     }
   }
 }
@@ -133,6 +176,14 @@ export async function checkMinutesForUpload(
     const response = await apiClient.getBalance(ctx.session.tokens.accessToken);
 
     if (!response.success || !response.data) {
+      // Check if user no longer exists (deleted after account merge)
+      if (response.error?.code === "USER_NOT_FOUND") {
+        ctx.session.isAuthenticated = false;
+        ctx.session.tokens = undefined;
+        ctx.session.user = undefined;
+        await ctx.reply("Sizning sessiyangiz yaroqsiz. Iltimos, /start buyrug'ini yuboring.");
+        return false;
+      }
       // If we can't check, allow the upload (backend will handle it)
       return true;
     }

@@ -20,3 +20,18 @@ export {
   handleBuyPackage,
 } from "./pricing.js";
 export { handleBalance, handleShowBalance, checkMinutesForUpload } from "./balance.js";
+export {
+  handleAccountLink,
+  isAccountLinkToken,
+  extractLinkToken,
+} from "./accountLinking.js";
+export {
+  handleInfo,
+  handleShowInfo,
+  handleSettings,
+  handleShowSettings,
+  handleLinkGoogle,
+  handleUnlinkGoogle,
+  handleBackToSettings,
+  handleBackToMain,
+} from "./settings.js";

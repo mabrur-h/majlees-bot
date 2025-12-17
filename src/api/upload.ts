@@ -1,4 +1,12 @@
+import { createReadStream } from "fs";
+import { stat, unlink } from "fs/promises";
+import { exec } from "child_process";
+import { promisify } from "util";
+import path from "path";
+import os from "os";
 import { config } from "../config.js";
+
+const execAsync = promisify(exec);
 
 export interface UploadOptions {
   filename: string;
@@ -115,6 +123,223 @@ class UploadService {
       };
     } catch (error) {
       console.error("Upload service error:", error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown upload error",
+      };
+    }
+  }
+
+  /**
+   * Upload a file from Local Bot API server
+   * Supports multiple file access methods:
+   * 1. Direct file access (Railway/Docker - same container)
+   * 2. Mounted volume (Linux/Mac local dev)
+   * 3. Docker cp fallback (Windows local dev)
+   */
+  async uploadFromLocalPath(
+    accessToken: string,
+    filePath: string,
+    options: UploadOptions,
+    botToken?: string,
+    localApiUrl?: string
+  ): Promise<UploadResult> {
+    try {
+      let fileBuffer: Buffer;
+
+      // Method 1: Try direct file access (for Railway where both services run in same container)
+      if (filePath.startsWith("/var/lib/telegram-bot-api/")) {
+        console.log("Trying direct file access:", filePath);
+        try {
+          const fileStats = await stat(filePath);
+          console.log("Direct access successful, file size:", fileStats.size, "bytes");
+
+          const chunks: Buffer[] = [];
+          const stream = createReadStream(filePath);
+          for await (const chunk of stream) {
+            chunks.push(Buffer.from(chunk));
+          }
+          fileBuffer = Buffer.concat(chunks);
+        } catch (directError) {
+          console.log("Direct file access failed, trying other methods...");
+
+          // Method 2: Try mounted volume on host (Linux/Mac local dev)
+          const hostFilesPath = config.localBotApiFilesPath;
+          if (hostFilesPath) {
+            const relativePath = filePath.replace("/var/lib/telegram-bot-api/", "");
+            const hostPath = path.join(hostFilesPath, relativePath);
+
+            console.log("Trying mounted volume:", hostPath);
+
+            try {
+              const fileStats = await stat(hostPath);
+              console.log("Mounted volume access successful, file size:", fileStats.size, "bytes");
+
+              const chunks: Buffer[] = [];
+              const stream = createReadStream(hostPath);
+              for await (const chunk of stream) {
+                chunks.push(Buffer.from(chunk));
+              }
+              fileBuffer = Buffer.concat(chunks);
+            } catch (mountError) {
+              // Method 3: Docker cp fallback (Windows local dev)
+              console.log("Mounted volume not accessible, trying docker cp...");
+
+              const tempFile = path.join(os.tmpdir(), `telegram-file-${Date.now()}.tmp`);
+
+              try {
+                const containerPath = `telegram-bot-api:${filePath}`;
+                console.log(`Running: docker cp "${containerPath}" "${tempFile}"`);
+
+                await execAsync(`docker cp "${containerPath}" "${tempFile}"`);
+
+                const fileStats = await stat(tempFile);
+                console.log("Docker cp successful, file size:", fileStats.size, "bytes");
+
+                const chunks: Buffer[] = [];
+                const stream = createReadStream(tempFile);
+                for await (const chunk of stream) {
+                  chunks.push(Buffer.from(chunk));
+                }
+                fileBuffer = Buffer.concat(chunks);
+
+                await unlink(tempFile).catch(() => {});
+              } catch (dockerError) {
+                console.error("All file access methods failed");
+                console.error("Direct access error:", directError);
+                console.error("Docker cp error:", dockerError);
+                return {
+                  success: false,
+                  error: `Failed to access file: ${filePath}`,
+                };
+              }
+            }
+          } else {
+            // No mounted volume configured, try docker cp directly
+            console.log("No mounted volume configured, trying docker cp...");
+
+            const tempFile = path.join(os.tmpdir(), `telegram-file-${Date.now()}.tmp`);
+
+            try {
+              const containerPath = `telegram-bot-api:${filePath}`;
+              console.log(`Running: docker cp "${containerPath}" "${tempFile}"`);
+
+              await execAsync(`docker cp "${containerPath}" "${tempFile}"`);
+
+              const fileStats = await stat(tempFile);
+              console.log("Docker cp successful, file size:", fileStats.size, "bytes");
+
+              const chunks: Buffer[] = [];
+              const stream = createReadStream(tempFile);
+              for await (const chunk of stream) {
+                chunks.push(Buffer.from(chunk));
+              }
+              fileBuffer = Buffer.concat(chunks);
+
+              await unlink(tempFile).catch(() => {});
+            } catch (dockerError) {
+              console.error("All file access methods failed");
+              console.error("Direct access error:", directError);
+              console.error("Docker cp error:", dockerError);
+              return {
+                success: false,
+                error: `Failed to access file: ${filePath}`,
+              };
+            }
+          }
+        }
+      } else {
+        // Non-standard path, try HTTP download as fallback
+        const apiUrl = localApiUrl || config.localBotApiUrl;
+        const token = botToken || config.botToken;
+
+        const fileUrl = `${apiUrl}/file/bot${token}/${filePath}`;
+        console.log("Downloading from Local Bot API:", fileUrl);
+
+        const fileResponse = await fetch(fileUrl);
+        if (!fileResponse.ok) {
+          return {
+            success: false,
+            error: `Failed to download file from Local Bot API: ${fileResponse.status}`,
+          };
+        }
+
+        const arrayBuffer = await fileResponse.arrayBuffer();
+        fileBuffer = Buffer.from(arrayBuffer);
+      }
+
+      console.log("File ready, size:", fileBuffer.length, "bytes");
+
+      // Convert Buffer to ArrayBuffer for Blob compatibility
+      const arrayBuffer = fileBuffer.buffer.slice(
+        fileBuffer.byteOffset,
+        fileBuffer.byteOffset + fileBuffer.length
+      ) as ArrayBuffer;
+      const fileBlob = new Blob([arrayBuffer], { type: options.mimeType });
+
+      // Create form data for upload
+      const formData = new FormData();
+      formData.append("file", fileBlob, options.filename);
+      formData.append("language", options.language);
+      formData.append("summarizationType", options.summarizationType);
+      if (options.title) {
+        formData.append("title", options.title);
+      }
+
+      // Upload to backend
+      const uploadUrl = this.baseUrl + "/api/v1/lectures/upload";
+      console.log("Uploading to:", uploadUrl);
+
+      const uploadResponse = await fetch(uploadUrl, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + accessToken,
+        },
+        body: formData,
+      });
+
+      const responseText = await uploadResponse.text();
+      console.log("Upload response status:", uploadResponse.status);
+      console.log("Upload response:", responseText);
+
+      if (!uploadResponse.ok) {
+        let errorMsg = "Upload failed with status " + uploadResponse.status;
+        let errorCode: string | undefined;
+        let isRateLimited = false;
+
+        if (uploadResponse.status === 429) {
+          isRateLimited = true;
+          errorCode = "RATE_LIMITED";
+          errorMsg = "Too many uploads. Please wait before uploading more files.";
+        }
+
+        try {
+          const errorData = JSON.parse(responseText);
+          errorCode = errorData.error?.code || errorCode;
+          errorMsg = errorData.error?.message || errorData.message || errorMsg;
+
+          if (errorCode === "UPLOAD_RATE_LIMIT_EXCEEDED" || errorCode === "RATE_LIMIT_EXCEEDED") {
+            isRateLimited = true;
+          }
+        } catch {
+          // Keep default error message
+        }
+
+        return {
+          success: false,
+          error: errorMsg,
+          errorCode,
+          isRateLimited,
+        };
+      }
+
+      const data = JSON.parse(responseText);
+      return {
+        success: true,
+        lectureId: data.data?.lecture?.id || data.lectureId || data.id,
+      };
+    } catch (error) {
+      console.error("Local file upload error:", error);
       return {
         success: false,
         error: error instanceof Error ? error.message : "Unknown upload error",
