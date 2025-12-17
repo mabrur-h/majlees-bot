@@ -227,10 +227,30 @@ export async function handleTypeSelection(ctx: BotContext): Promise<void> {
     if (config.useLocalBotApi) {
       // Local Bot API returns a local file path
       // The file is stored locally by telegram-bot-api server
+      // Progress callback to update user on upload progress
+      let lastProgressUpdate = 0;
+      const onProgress = async (percent: number) => {
+        // Only update every 20% to avoid rate limiting
+        if (percent - lastProgressUpdate >= 20 || percent === 100) {
+          lastProgressUpdate = percent;
+          try {
+            await ctx.editMessageText(
+              `${typeName}\n\n📤 Serverga yuklanmoqda... (2/3)\n\n` +
+              `${"▓".repeat(Math.floor(percent / 10))}${"░".repeat(10 - Math.floor(percent / 10))} ${percent}%`
+            );
+          } catch {
+            // Ignore edit errors (message might not have changed)
+          }
+        }
+      };
+
       result = await uploadService.uploadFromLocalPath(
         ctx.session.tokens.accessToken,
         file.file_path,
-        uploadOptions
+        uploadOptions,
+        undefined, // botToken
+        undefined, // localApiUrl
+        onProgress
       );
     } else {
       // Cloud API - construct URL to download file
