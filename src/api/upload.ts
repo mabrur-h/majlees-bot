@@ -555,8 +555,16 @@ class UploadService {
                 }
                 lastError = "Offset mismatch";
               } else if (patchResponse.status === 503 || patchResponse.status === 500) {
-                // Server error - retry
+                // Server error - check if it's a session expiration error
                 const errorText = await patchResponse.text();
+
+                // Check if this is actually a session expired error (server returns 500 with UPLOAD_NOT_FOUND)
+                if (errorText.includes('UPLOAD_NOT_FOUND') || errorText.includes('expired') || errorText.includes('corrupted')) {
+                  console.log("Upload session expired (500 with UPLOAD_NOT_FOUND), will restart upload...");
+                  sessionExpired = true;
+                  break;
+                }
+
                 lastError = `Server error ${patchResponse.status}: ${errorText}`;
                 console.error(lastError);
               } else {

@@ -30,7 +30,7 @@ export async function handleShowInfo(ctx: BotContext): Promise<void> {
  */
 async function showInfo(ctx: BotContext, _isCallback: boolean): Promise<void> {
   const message =
-    `📚 *Dabir Notes - Foydalanish qo'llanmasi*\n\n` +
+    `📚 *Majleesdan - Foydalanish qo'llanmasi*\n\n` +
     `*Botdan qanday foydalanish:*\n\n` +
     `1️⃣ *Video/Audio yuborish*\n` +
     `Menga video yoki audio fayl yuboring. Men uni avtomatik qayta ishlab, transkriptsiya qilaman.\n\n` +

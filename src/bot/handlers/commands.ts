@@ -136,7 +136,7 @@ export async function handleShowPlans(ctx: BotContext): Promise<void> {
 
 export async function handleHelp(ctx: BotContext): Promise<void> {
   await ctx.reply(
-    "Dabir Notes dan qanday foydalanish:\n\n" +
+    "Majleesdan dan qanday foydalanish:\n\n" +
       "1. Menyu tugmasini yoki \"Ilovani ochish\" tugmasini bosing\n" +
       "2. Audio/video ma'ruzangizni yuklang\n" +
       "3. Transkriptsiya, xulosa va asosiy fikrlarni oling\n\n" +
@@ -145,7 +145,7 @@ export async function handleHelp(ctx: BotContext): Promise<void> {
 }
 
 export async function handleApp(ctx: BotContext): Promise<void> {
-  const keyboard = new InlineKeyboard().webApp("Dabir Notes ni ochish", WEB_APP_URL);
+  const keyboard = new InlineKeyboard().webApp("Majleesni ochish", WEB_APP_URL);
 
   await ctx.reply("Ilovani ochish uchun quyidagi tugmani bosing:", {
     reply_markup: keyboard,
