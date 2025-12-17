@@ -443,17 +443,13 @@ class UploadService {
 
       console.log("Upload created at:", uploadLocation);
 
-      // Step 2: Upload file in chunks
+      // Step 2: Upload file in chunks sequentially
       let offset = 0;
       let lectureId: string | null = null;
 
       while (offset < fileSize) {
-        const chunkEnd = Math.min(offset + CHUNK_SIZE, fileSize);
-        const chunk = fileBuffer.slice(offset, chunkEnd);
         const chunkNumber = Math.floor(offset / CHUNK_SIZE) + 1;
         const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
-
-        console.log(`Uploading chunk ${chunkNumber}/${totalChunks} (${chunk.byteLength} bytes, offset: ${offset})`);
 
         let success = false;
         let lastError: string | null = null;
@@ -461,9 +457,36 @@ class UploadService {
         for (let retry = 0; retry < MAX_RETRIES && !success; retry++) {
           if (retry > 0) {
             console.log(`Retry ${retry}/${MAX_RETRIES} for chunk ${chunkNumber}`);
-            // Wait before retry (exponential backoff)
-            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retry)));
+            // Wait before retry (exponential backoff: 2s, 4s, 8s)
+            await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, retry)));
+
+            // On retry, check server's current offset with HEAD request
+            try {
+              const headResponse = await fetch(uploadLocation, {
+                method: "HEAD",
+                headers: {
+                  Authorization: "Bearer " + accessToken,
+                  "Tus-Resumable": "1.0.0",
+                },
+              });
+              const serverOffset = headResponse.headers.get("Upload-Offset");
+              if (serverOffset) {
+                const serverOffsetNum = parseInt(serverOffset, 10);
+                if (serverOffsetNum !== offset) {
+                  console.log(`Server offset (${serverOffsetNum}) differs from local (${offset}), adjusting...`);
+                  offset = serverOffsetNum;
+                }
+              }
+            } catch (headError) {
+              console.log("HEAD request failed, continuing with current offset");
+            }
           }
+
+          // Calculate chunk based on current offset
+          const chunkEnd = Math.min(offset + CHUNK_SIZE, fileSize);
+          const chunk = fileBuffer.slice(offset, chunkEnd);
+
+          console.log(`Uploading chunk ${chunkNumber}/${totalChunks} (${chunk.byteLength} bytes, offset: ${offset})`);
 
           try {
             const patchResponse = await fetch(uploadLocation, {
@@ -500,6 +523,19 @@ class UploadService {
               if (onProgress) {
                 onProgress(percent);
               }
+            } else if (patchResponse.status === 409) {
+              // Offset mismatch - get correct offset from server
+              const serverOffset = patchResponse.headers.get("Upload-Offset");
+              if (serverOffset) {
+                offset = parseInt(serverOffset, 10);
+                console.log(`Offset mismatch, server at ${offset}, retrying...`);
+              }
+              lastError = "Offset mismatch";
+            } else if (patchResponse.status === 503 || patchResponse.status === 500) {
+              // Server error - retry
+              const errorText = await patchResponse.text();
+              lastError = `Server error ${patchResponse.status}: ${errorText}`;
+              console.error(lastError);
             } else {
               const errorText = await patchResponse.text();
               lastError = `Chunk upload failed: ${patchResponse.status} - ${errorText}`;
