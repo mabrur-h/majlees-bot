@@ -136,6 +136,8 @@ class UploadService {
    * 1. Direct file access (Railway/Docker - same container)
    * 2. Mounted volume (Linux/Mac local dev)
    * 3. Docker cp fallback (Windows local dev)
+   *
+   * Files are automatically cleaned up after successful upload to save disk space.
    */
   async uploadFromLocalPath(
     accessToken: string,
@@ -144,6 +146,9 @@ class UploadService {
     botToken?: string,
     localApiUrl?: string
   ): Promise<UploadResult> {
+    // Track the actual file path for cleanup later
+    let actualFilePath: string | null = null;
+
     try {
       let fileBuffer: Buffer;
 
@@ -160,6 +165,7 @@ class UploadService {
             chunks.push(Buffer.from(chunk));
           }
           fileBuffer = Buffer.concat(chunks);
+          actualFilePath = filePath; // Track for cleanup
         } catch (directError) {
           console.log("Direct file access failed, trying other methods...");
 
@@ -181,6 +187,7 @@ class UploadService {
                 chunks.push(Buffer.from(chunk));
               }
               fileBuffer = Buffer.concat(chunks);
+              actualFilePath = hostPath; // Track for cleanup
             } catch (mountError) {
               // Method 3: Docker cp fallback (Windows local dev)
               console.log("Mounted volume not accessible, trying docker cp...");
@@ -334,6 +341,18 @@ class UploadService {
       }
 
       const data = JSON.parse(responseText);
+
+      // Clean up the source file after successful upload to save disk space
+      if (actualFilePath) {
+        try {
+          await unlink(actualFilePath);
+          console.log("Cleaned up source file:", actualFilePath);
+        } catch (cleanupError) {
+          // Non-fatal - just log it
+          console.log("Could not clean up source file (may already be deleted):", actualFilePath);
+        }
+      }
+
       return {
         success: true,
         lectureId: data.data?.lecture?.id || data.lectureId || data.id,
