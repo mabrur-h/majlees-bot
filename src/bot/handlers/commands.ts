@@ -78,14 +78,14 @@ export async function handleStart(ctx: BotContext): Promise<void> {
   }
 
   // Send slide 1 with intro info
-  const slide1Path = path.join(IMAGES_DIR, "slide1.png");
+  const slide1Path = path.join(IMAGES_DIR, "slide1.PNG");
   const slide1Message = await ctx.replyWithPhoto(new InputFile(slide1Path), {
     caption: SLIDE1_CAPTION,
     parse_mode: "Markdown",
   });
 
   // Send slide 2 with CTA and inline keyboard, replying to slide 1
-  const slide2Path = path.join(IMAGES_DIR, "slide2.png");
+  const slide2Path = path.join(IMAGES_DIR, "slide2.PNG");
   await ctx.replyWithPhoto(new InputFile(slide2Path), {
     caption: SLIDE2_CAPTION,
     parse_mode: "Markdown",
