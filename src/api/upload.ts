@@ -275,72 +275,94 @@ class UploadService {
         fileBuffer = Buffer.from(arrayBuffer);
       }
 
-      console.log("File ready, size:", fileBuffer.length, "bytes");
+      const fileSizeMB = fileBuffer.length / 1024 / 1024;
+      console.log(`File ready, size: ${fileBuffer.length} bytes (${fileSizeMB.toFixed(1)} MB)`);
 
-      // Convert Buffer to ArrayBuffer for Blob compatibility
+      // Convert Buffer to ArrayBuffer
       const arrayBuffer = fileBuffer.buffer.slice(
         fileBuffer.byteOffset,
         fileBuffer.byteOffset + fileBuffer.length
       ) as ArrayBuffer;
-      const fileBlob = new Blob([arrayBuffer], { type: options.mimeType });
 
-      // Create form data for upload
-      const formData = new FormData();
-      formData.append("file", fileBlob, options.filename);
-      formData.append("language", options.language);
-      formData.append("summarizationType", options.summarizationType);
-      if (options.title) {
-        formData.append("title", options.title);
-      }
+      // Use TUS chunked upload for all files (more reliable, avoids 413 errors)
+      const TUS_THRESHOLD_MB = 10; // Use TUS for files larger than 10MB
 
-      // Upload to backend
-      const uploadUrl = this.baseUrl + "/api/v1/lectures/upload";
-      console.log("Uploading to:", uploadUrl);
+      let result: UploadResult;
 
-      const uploadResponse = await fetch(uploadUrl, {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer " + accessToken,
-        },
-        body: formData,
-      });
+      if (fileSizeMB > TUS_THRESHOLD_MB) {
+        // Use TUS chunked upload for large files
+        console.log(`Using TUS chunked upload (file > ${TUS_THRESHOLD_MB}MB)`);
+        result = await this.uploadWithTus(accessToken, arrayBuffer, options);
+      } else {
+        // Use simple upload for small files
+        console.log("Using simple upload (small file)");
+        const fileBlob = new Blob([arrayBuffer], { type: options.mimeType });
 
-      const responseText = await uploadResponse.text();
-      console.log("Upload response status:", uploadResponse.status);
-      console.log("Upload response:", responseText);
-
-      if (!uploadResponse.ok) {
-        let errorMsg = "Upload failed with status " + uploadResponse.status;
-        let errorCode: string | undefined;
-        let isRateLimited = false;
-
-        if (uploadResponse.status === 429) {
-          isRateLimited = true;
-          errorCode = "RATE_LIMITED";
-          errorMsg = "Too many uploads. Please wait before uploading more files.";
+        const formData = new FormData();
+        formData.append("file", fileBlob, options.filename);
+        formData.append("language", options.language);
+        formData.append("summarizationType", options.summarizationType);
+        if (options.title) {
+          formData.append("title", options.title);
         }
 
-        try {
-          const errorData = JSON.parse(responseText);
-          errorCode = errorData.error?.code || errorCode;
-          errorMsg = errorData.error?.message || errorData.message || errorMsg;
+        const uploadUrl = this.baseUrl + "/api/v1/lectures/upload";
+        console.log("Uploading to:", uploadUrl);
 
-          if (errorCode === "UPLOAD_RATE_LIMIT_EXCEEDED" || errorCode === "RATE_LIMIT_EXCEEDED") {
+        const uploadResponse = await fetch(uploadUrl, {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + accessToken,
+          },
+          body: formData,
+        });
+
+        const responseText = await uploadResponse.text();
+        console.log("Upload response status:", uploadResponse.status);
+        console.log("Upload response:", responseText);
+
+        if (!uploadResponse.ok) {
+          let errorMsg = "Upload failed with status " + uploadResponse.status;
+          let errorCode: string | undefined;
+          let isRateLimited = false;
+
+          if (uploadResponse.status === 429) {
             isRateLimited = true;
+            errorCode = "RATE_LIMITED";
+            errorMsg = "Too many uploads. Please wait before uploading more files.";
           }
-        } catch {
-          // Keep default error message
-        }
 
-        return {
-          success: false,
-          error: errorMsg,
-          errorCode,
-          isRateLimited,
-        };
+          try {
+            const errorData = JSON.parse(responseText);
+            errorCode = errorData.error?.code || errorCode;
+            errorMsg = errorData.error?.message || errorData.message || errorMsg;
+
+            if (errorCode === "UPLOAD_RATE_LIMIT_EXCEEDED" || errorCode === "RATE_LIMIT_EXCEEDED") {
+              isRateLimited = true;
+            }
+          } catch {
+            // Keep default error message
+          }
+
+          result = {
+            success: false,
+            error: errorMsg,
+            errorCode,
+            isRateLimited,
+          };
+        } else {
+          const data = JSON.parse(responseText);
+          result = {
+            success: true,
+            lectureId: data.data?.lecture?.id || data.lectureId || data.id,
+          };
+        }
       }
 
-      const data = JSON.parse(responseText);
+      // Only clean up and return success if upload succeeded
+      if (!result.success) {
+        return result;
+      }
 
       // Clean up the source file after successful upload to save disk space
       if (actualFilePath) {
@@ -353,10 +375,7 @@ class UploadService {
         }
       }
 
-      return {
-        success: true,
-        lectureId: data.data?.lecture?.id || data.lectureId || data.id,
-      };
+      return result;
     } catch (error) {
       console.error("Local file upload error:", error);
       return {
@@ -367,14 +386,18 @@ class UploadService {
   }
 
   /**
-   * Upload using TUS protocol (resumable uploads)
-   * For larger files, this provides better reliability
+   * Upload using TUS protocol with chunked uploads (resumable)
+   * Uploads file in chunks to avoid server size limits and enable resume on failure
    */
   async uploadWithTus(
     accessToken: string,
     fileBuffer: ArrayBuffer,
-    options: UploadOptions
+    options: UploadOptions,
+    onProgress?: (percent: number) => void
   ): Promise<UploadResult> {
+    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+    const MAX_RETRIES = 3;
+
     try {
       const uploadEndpoint = this.baseUrl + "/api/v1/uploads";
       const fileSize = fileBuffer.byteLength;
@@ -388,7 +411,8 @@ class UploadService {
         title: options.title || "",
       });
 
-      console.log("Creating TUS upload, size:", fileSize);
+      console.log(`Creating TUS upload, size: ${fileSize} bytes (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+      console.log(`Will upload in ${Math.ceil(fileSize / CHUNK_SIZE)} chunks of ${CHUNK_SIZE / 1024 / 1024}MB`);
 
       const createResponse = await fetch(uploadEndpoint, {
         method: "POST",
@@ -397,7 +421,6 @@ class UploadService {
           "Tus-Resumable": "1.0.0",
           "Upload-Length": String(fileSize),
           "Upload-Metadata": metadata,
-          "Content-Type": "application/offset+octet-stream",
         },
       });
 
@@ -420,30 +443,83 @@ class UploadService {
 
       console.log("Upload created at:", uploadLocation);
 
-      // Step 2: Upload the file content with PATCH
-      const patchResponse = await fetch(uploadLocation, {
-        method: "PATCH",
-        headers: {
-          Authorization: "Bearer " + accessToken,
-          "Tus-Resumable": "1.0.0",
-          "Upload-Offset": "0",
-          "Content-Type": "application/offset+octet-stream",
-        },
-        body: fileBuffer,
-      });
+      // Step 2: Upload file in chunks
+      let offset = 0;
+      let lectureId: string | null = null;
 
-      if (patchResponse.status !== 204) {
-        const errorText = await patchResponse.text();
-        console.error("TUS patch failed:", patchResponse.status, errorText);
-        return {
-          success: false,
-          error: "Failed to upload file: " + patchResponse.status,
-        };
+      while (offset < fileSize) {
+        const chunkEnd = Math.min(offset + CHUNK_SIZE, fileSize);
+        const chunk = fileBuffer.slice(offset, chunkEnd);
+        const chunkNumber = Math.floor(offset / CHUNK_SIZE) + 1;
+        const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+
+        console.log(`Uploading chunk ${chunkNumber}/${totalChunks} (${chunk.byteLength} bytes, offset: ${offset})`);
+
+        let success = false;
+        let lastError: string | null = null;
+
+        for (let retry = 0; retry < MAX_RETRIES && !success; retry++) {
+          if (retry > 0) {
+            console.log(`Retry ${retry}/${MAX_RETRIES} for chunk ${chunkNumber}`);
+            // Wait before retry (exponential backoff)
+            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retry)));
+          }
+
+          try {
+            const patchResponse = await fetch(uploadLocation, {
+              method: "PATCH",
+              headers: {
+                Authorization: "Bearer " + accessToken,
+                "Tus-Resumable": "1.0.0",
+                "Upload-Offset": String(offset),
+                "Content-Type": "application/offset+octet-stream",
+              },
+              body: chunk,
+            });
+
+            if (patchResponse.status === 204 || patchResponse.status === 200) {
+              // Get the new offset from response
+              const newOffset = patchResponse.headers.get("Upload-Offset");
+              if (newOffset) {
+                offset = parseInt(newOffset, 10);
+              } else {
+                offset = chunkEnd;
+              }
+
+              // Check for lecture ID on final chunk
+              const respLectureId = patchResponse.headers.get("X-Lecture-Id");
+              if (respLectureId) {
+                lectureId = respLectureId;
+              }
+
+              success = true;
+
+              // Report progress
+              const percent = Math.round((offset / fileSize) * 100);
+              console.log(`Progress: ${percent}%`);
+              if (onProgress) {
+                onProgress(percent);
+              }
+            } else {
+              const errorText = await patchResponse.text();
+              lastError = `Chunk upload failed: ${patchResponse.status} - ${errorText}`;
+              console.error(lastError);
+            }
+          } catch (fetchError) {
+            lastError = fetchError instanceof Error ? fetchError.message : "Network error";
+            console.error(`Chunk upload network error: ${lastError}`);
+          }
+        }
+
+        if (!success) {
+          return {
+            success: false,
+            error: lastError || "Failed to upload chunk after retries",
+          };
+        }
       }
 
-      // Get lecture ID from response header
-      const lectureId = patchResponse.headers.get("X-Lecture-Id");
-      console.log("Upload complete, lecture ID:", lectureId);
+      console.log("TUS upload complete, lecture ID:", lectureId);
 
       return {
         success: true,
