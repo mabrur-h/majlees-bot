@@ -388,6 +388,7 @@ class UploadService {
   /**
    * Upload using TUS protocol with chunked uploads (resumable)
    * Uploads file in chunks to avoid server size limits and enable resume on failure
+   * Automatically restarts upload if session expires (e.g., server restart)
    */
   async uploadWithTus(
     accessToken: string,
@@ -397,177 +398,222 @@ class UploadService {
   ): Promise<UploadResult> {
     const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
     const MAX_RETRIES = 3;
+    const MAX_SESSION_RESTARTS = 2; // Max times to restart entire upload
 
-    try {
-      const uploadEndpoint = this.baseUrl + "/api/v1/uploads";
-      const fileSize = fileBuffer.byteLength;
+    let sessionRestarts = 0;
 
-      // Step 1: Create upload with POST
-      const metadata = this.buildMetadata({
-        filename: options.filename,
-        filetype: options.mimeType,
-        language: options.language,
-        summarizationType: options.summarizationType,
-        title: options.title || "",
-      });
+    // Wrap in restart loop to handle expired sessions
+    while (sessionRestarts <= MAX_SESSION_RESTARTS) {
+      try {
+        const uploadEndpoint = this.baseUrl + "/api/v1/uploads";
+        const fileSize = fileBuffer.byteLength;
 
-      console.log(`Creating TUS upload, size: ${fileSize} bytes (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
-      console.log(`Will upload in ${Math.ceil(fileSize / CHUNK_SIZE)} chunks of ${CHUNK_SIZE / 1024 / 1024}MB`);
+        // Step 1: Create upload with POST
+        const metadata = this.buildMetadata({
+          filename: options.filename,
+          filetype: options.mimeType,
+          language: options.language,
+          summarizationType: options.summarizationType,
+          title: options.title || "",
+        });
 
-      const createResponse = await fetch(uploadEndpoint, {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer " + accessToken,
-          "Tus-Resumable": "1.0.0",
-          "Upload-Length": String(fileSize),
-          "Upload-Metadata": metadata,
-        },
-      });
+        if (sessionRestarts > 0) {
+          console.log(`Restarting upload (attempt ${sessionRestarts + 1}/${MAX_SESSION_RESTARTS + 1})...`);
+        }
+        console.log(`Creating TUS upload, size: ${fileSize} bytes (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+        console.log(`Will upload in ${Math.ceil(fileSize / CHUNK_SIZE)} chunks of ${CHUNK_SIZE / 1024 / 1024}MB`);
 
-      if (createResponse.status !== 201) {
-        const errorText = await createResponse.text();
-        console.error("TUS create failed:", createResponse.status, errorText);
-        return {
-          success: false,
-          error: "Failed to create upload: " + createResponse.status,
-        };
-      }
+        const createResponse = await fetch(uploadEndpoint, {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + accessToken,
+            "Tus-Resumable": "1.0.0",
+            "Upload-Length": String(fileSize),
+            "Upload-Metadata": metadata,
+          },
+        });
 
-      const uploadLocation = createResponse.headers.get("Location");
-      if (!uploadLocation) {
-        return {
-          success: false,
-          error: "No upload location returned",
-        };
-      }
+        if (createResponse.status !== 201) {
+          const errorText = await createResponse.text();
+          console.error("TUS create failed:", createResponse.status, errorText);
+          return {
+            success: false,
+            error: "Failed to create upload: " + createResponse.status,
+          };
+        }
 
-      console.log("Upload created at:", uploadLocation);
+        const uploadLocation = createResponse.headers.get("Location");
+        if (!uploadLocation) {
+          return {
+            success: false,
+            error: "No upload location returned",
+          };
+        }
 
-      // Step 2: Upload file in chunks sequentially
-      let offset = 0;
-      let lectureId: string | null = null;
+        console.log("Upload created at:", uploadLocation);
 
-      while (offset < fileSize) {
-        const chunkNumber = Math.floor(offset / CHUNK_SIZE) + 1;
-        const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+        // Step 2: Upload file in chunks sequentially
+        let offset = 0;
+        let lectureId: string | null = null;
+        let sessionExpired = false;
 
-        let success = false;
-        let lastError: string | null = null;
+        while (offset < fileSize && !sessionExpired) {
+          const chunkNumber = Math.floor(offset / CHUNK_SIZE) + 1;
+          const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
 
-        for (let retry = 0; retry < MAX_RETRIES && !success; retry++) {
-          if (retry > 0) {
-            console.log(`Retry ${retry}/${MAX_RETRIES} for chunk ${chunkNumber}`);
-            // Wait before retry (exponential backoff: 2s, 4s, 8s)
-            await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, retry)));
+          let success = false;
+          let lastError: string | null = null;
 
-            // On retry, check server's current offset with HEAD request
+          for (let retry = 0; retry < MAX_RETRIES && !success && !sessionExpired; retry++) {
+            if (retry > 0) {
+              console.log(`Retry ${retry}/${MAX_RETRIES} for chunk ${chunkNumber}`);
+              // Wait before retry (exponential backoff: 2s, 4s, 8s)
+              await new Promise(resolve => setTimeout(resolve, 2000 * Math.pow(2, retry)));
+
+              // On retry, check server's current offset with HEAD request
+              try {
+                const headResponse = await fetch(uploadLocation, {
+                  method: "HEAD",
+                  headers: {
+                    Authorization: "Bearer " + accessToken,
+                    "Tus-Resumable": "1.0.0",
+                  },
+                });
+
+                // Check if session expired (404 = upload not found)
+                if (headResponse.status === 404) {
+                  console.log("Upload session expired (404), will restart upload...");
+                  sessionExpired = true;
+                  break;
+                }
+
+                const serverOffset = headResponse.headers.get("Upload-Offset");
+                if (serverOffset) {
+                  const serverOffsetNum = parseInt(serverOffset, 10);
+                  if (serverOffsetNum !== offset) {
+                    console.log(`Server offset (${serverOffsetNum}) differs from local (${offset}), adjusting...`);
+                    offset = serverOffsetNum;
+                  }
+                }
+              } catch (headError) {
+                console.log("HEAD request failed, continuing with current offset");
+              }
+            }
+
+            // Calculate chunk based on current offset
+            const chunkEnd = Math.min(offset + CHUNK_SIZE, fileSize);
+            const chunk = fileBuffer.slice(offset, chunkEnd);
+
+            console.log(`Uploading chunk ${chunkNumber}/${totalChunks} (${chunk.byteLength} bytes, offset: ${offset})`);
+
             try {
-              const headResponse = await fetch(uploadLocation, {
-                method: "HEAD",
+              const patchResponse = await fetch(uploadLocation, {
+                method: "PATCH",
                 headers: {
                   Authorization: "Bearer " + accessToken,
                   "Tus-Resumable": "1.0.0",
+                  "Upload-Offset": String(offset),
+                  "Content-Type": "application/offset+octet-stream",
                 },
+                body: chunk,
               });
-              const serverOffset = headResponse.headers.get("Upload-Offset");
-              if (serverOffset) {
-                const serverOffsetNum = parseInt(serverOffset, 10);
-                if (serverOffsetNum !== offset) {
-                  console.log(`Server offset (${serverOffsetNum}) differs from local (${offset}), adjusting...`);
-                  offset = serverOffsetNum;
+
+              if (patchResponse.status === 204 || patchResponse.status === 200) {
+                // Get the new offset from response
+                const newOffset = patchResponse.headers.get("Upload-Offset");
+                if (newOffset) {
+                  offset = parseInt(newOffset, 10);
+                } else {
+                  offset = chunkEnd;
                 }
-              }
-            } catch (headError) {
-              console.log("HEAD request failed, continuing with current offset");
-            }
-          }
 
-          // Calculate chunk based on current offset
-          const chunkEnd = Math.min(offset + CHUNK_SIZE, fileSize);
-          const chunk = fileBuffer.slice(offset, chunkEnd);
+                // Check for lecture ID on final chunk
+                const respLectureId = patchResponse.headers.get("X-Lecture-Id");
+                if (respLectureId) {
+                  lectureId = respLectureId;
+                }
 
-          console.log(`Uploading chunk ${chunkNumber}/${totalChunks} (${chunk.byteLength} bytes, offset: ${offset})`);
+                success = true;
 
-          try {
-            const patchResponse = await fetch(uploadLocation, {
-              method: "PATCH",
-              headers: {
-                Authorization: "Bearer " + accessToken,
-                "Tus-Resumable": "1.0.0",
-                "Upload-Offset": String(offset),
-                "Content-Type": "application/offset+octet-stream",
-              },
-              body: chunk,
-            });
-
-            if (patchResponse.status === 204 || patchResponse.status === 200) {
-              // Get the new offset from response
-              const newOffset = patchResponse.headers.get("Upload-Offset");
-              if (newOffset) {
-                offset = parseInt(newOffset, 10);
+                // Report progress
+                const percent = Math.round((offset / fileSize) * 100);
+                console.log(`Progress: ${percent}%`);
+                if (onProgress) {
+                  onProgress(percent);
+                }
+              } else if (patchResponse.status === 404) {
+                // Upload session expired - need to restart
+                console.log("Upload session expired (404 on PATCH), will restart upload...");
+                sessionExpired = true;
+                break;
+              } else if (patchResponse.status === 409) {
+                // Offset mismatch - get correct offset from server
+                const serverOffset = patchResponse.headers.get("Upload-Offset");
+                if (serverOffset) {
+                  offset = parseInt(serverOffset, 10);
+                  console.log(`Offset mismatch, server at ${offset}, retrying...`);
+                }
+                lastError = "Offset mismatch";
+              } else if (patchResponse.status === 503 || patchResponse.status === 500) {
+                // Server error - retry
+                const errorText = await patchResponse.text();
+                lastError = `Server error ${patchResponse.status}: ${errorText}`;
+                console.error(lastError);
               } else {
-                offset = chunkEnd;
+                const errorText = await patchResponse.text();
+                lastError = `Chunk upload failed: ${patchResponse.status} - ${errorText}`;
+                console.error(lastError);
               }
-
-              // Check for lecture ID on final chunk
-              const respLectureId = patchResponse.headers.get("X-Lecture-Id");
-              if (respLectureId) {
-                lectureId = respLectureId;
-              }
-
-              success = true;
-
-              // Report progress
-              const percent = Math.round((offset / fileSize) * 100);
-              console.log(`Progress: ${percent}%`);
-              if (onProgress) {
-                onProgress(percent);
-              }
-            } else if (patchResponse.status === 409) {
-              // Offset mismatch - get correct offset from server
-              const serverOffset = patchResponse.headers.get("Upload-Offset");
-              if (serverOffset) {
-                offset = parseInt(serverOffset, 10);
-                console.log(`Offset mismatch, server at ${offset}, retrying...`);
-              }
-              lastError = "Offset mismatch";
-            } else if (patchResponse.status === 503 || patchResponse.status === 500) {
-              // Server error - retry
-              const errorText = await patchResponse.text();
-              lastError = `Server error ${patchResponse.status}: ${errorText}`;
-              console.error(lastError);
-            } else {
-              const errorText = await patchResponse.text();
-              lastError = `Chunk upload failed: ${patchResponse.status} - ${errorText}`;
-              console.error(lastError);
+            } catch (fetchError) {
+              lastError = fetchError instanceof Error ? fetchError.message : "Network error";
+              console.error(`Chunk upload network error: ${lastError}`);
             }
-          } catch (fetchError) {
-            lastError = fetchError instanceof Error ? fetchError.message : "Network error";
-            console.error(`Chunk upload network error: ${lastError}`);
+          }
+
+          if (sessionExpired) {
+            break; // Exit chunk loop to restart upload
+          }
+
+          if (!success) {
+            return {
+              success: false,
+              error: lastError || "Failed to upload chunk after retries",
+            };
           }
         }
 
-        if (!success) {
-          return {
-            success: false,
-            error: lastError || "Failed to upload chunk after retries",
-          };
+        // If session expired, increment counter and restart
+        if (sessionExpired) {
+          sessionRestarts++;
+          if (sessionRestarts > MAX_SESSION_RESTARTS) {
+            return {
+              success: false,
+              error: "Upload session expired multiple times. Server may be unstable.",
+            };
+          }
+          continue; // Restart the upload
         }
+
+        console.log("TUS upload complete, lecture ID:", lectureId);
+
+        return {
+          success: true,
+          lectureId: lectureId || undefined,
+        };
+      } catch (error) {
+        console.error("TUS upload error:", error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown TUS upload error",
+        };
       }
-
-      console.log("TUS upload complete, lecture ID:", lectureId);
-
-      return {
-        success: true,
-        lectureId: lectureId || undefined,
-      };
-    } catch (error) {
-      console.error("TUS upload error:", error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : "Unknown TUS upload error",
-      };
     }
+
+    // Should not reach here, but just in case
+    return {
+      success: false,
+      error: "Upload failed after multiple session restarts",
+    };
   }
 
   /**
