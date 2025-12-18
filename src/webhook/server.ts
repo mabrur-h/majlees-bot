@@ -14,6 +14,15 @@ export interface LectureNotification {
   errorMessage?: string;
 }
 
+export interface PaymentNotification {
+  type: "payment_notification";
+  telegramId: number;
+  status: "success" | "failed" | "cancelled";
+  amount: number;
+  paymentType: "plan" | "package";
+  itemName: string;
+}
+
 export function createWebhookServer(bot: Bot<BotContext>, port: number = 3001) {
   const app = express();
   app.use(express.json());
@@ -56,6 +65,36 @@ export function createWebhookServer(bot: Bot<BotContext>, port: number = 3001) {
     }
   });
 
+  // Payment notification webhook
+  app.post("/webhook/payment", async (req, res) => {
+    console.log("Received payment webhook request");
+    const authHeader = req.headers.authorization;
+    const expectedSecret = config.webhookSecret;
+
+    if (expectedSecret && authHeader !== "Bearer " + expectedSecret) {
+      console.log("Unauthorized payment webhook request");
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const notification = req.body as PaymentNotification;
+
+    if (notification.type !== "payment_notification") {
+      res.status(400).json({ error: "Invalid notification type" });
+      return;
+    }
+
+    console.log("Received payment notification:", notification.status, notification.amount);
+
+    try {
+      await sendPaymentNotification(bot, notification);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Failed to send payment notification:", error);
+      res.status(500).json({ error: "Failed to send notification" });
+    }
+  });
+
   app.listen(port, "0.0.0.0", () => {
     console.log("Webhook server running on port " + port + " (0.0.0.0)");
   });
@@ -89,6 +128,52 @@ async function sendLectureNotification(
     await bot.api.sendMessage(
       telegramId,
       "Processing Failed: " + displayTitle + " - " + errorMsg
+    );
+  }
+}
+
+async function sendPaymentNotification(
+  bot: Bot<BotContext>,
+  notification: PaymentNotification
+): Promise<void> {
+  const { telegramId, status, amount, paymentType, itemName } = notification;
+
+  // Format amount with thousands separator
+  const formattedAmount = amount.toLocaleString("uz-UZ");
+  const typeText = paymentType === "plan" ? "tarif" : "paket";
+
+  if (status === "success") {
+    const keyboard = new InlineKeyboard()
+      .webApp("Balansni ko'rish", config.webAppUrl + "?startapp=balance");
+
+    await bot.api.sendMessage(
+      telegramId,
+      `✅ *To'lov muvaffaqiyatli!*\n\n` +
+      `📦 ${itemName} ${typeText}i faollashtirildi\n` +
+      `💰 Summa: ${formattedAmount} UZS\n\n` +
+      `Xizmatimizdan foydalanganingiz uchun rahmat!`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: keyboard
+      }
+    );
+  } else if (status === "cancelled") {
+    await bot.api.sendMessage(
+      telegramId,
+      `❌ *To'lov bekor qilindi*\n\n` +
+      `📦 ${itemName} ${typeText}i\n` +
+      `💰 Summa: ${formattedAmount} UZS\n\n` +
+      `Agar savollaringiz bo'lsa, /help buyrug'ini yuboring.`,
+      { parse_mode: "Markdown" }
+    );
+  } else {
+    await bot.api.sendMessage(
+      telegramId,
+      `⚠️ *To'lov amalga oshmadi*\n\n` +
+      `📦 ${itemName} ${typeText}i\n` +
+      `💰 Summa: ${formattedAmount} UZS\n\n` +
+      `Iltimos, qaytadan urinib ko'ring yoki /pricing buyrug'ini yuboring.`,
+      { parse_mode: "Markdown" }
     );
   }
 }
