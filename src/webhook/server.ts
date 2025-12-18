@@ -23,11 +23,17 @@ export function createWebhookServer(bot: Bot<BotContext>, port: number = 3001) {
   });
 
   app.post("/webhook/lecture", async (req, res) => {
+    console.log("Received lecture webhook request");
     const authHeader = req.headers.authorization;
     const expectedSecret = config.webhookSecret;
-    
+
+    // Debug logging (without revealing full secrets)
+    console.log("Auth header present:", !!authHeader);
+    console.log("Expected secret configured:", !!expectedSecret);
+
     if (expectedSecret && authHeader !== "Bearer " + expectedSecret) {
-      console.log("Unauthorized webhook request");
+      console.log("Unauthorized webhook request - secret mismatch");
+      console.log("Auth header prefix:", authHeader?.substring(0, 15) + "...");
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
