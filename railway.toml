@@ -9,3 +9,6 @@ restartPolicyMaxRetries = 10
 # Health check for the bot webhook server
 healthcheckPath = "/health"
 healthcheckTimeout = 300
+
+# Internal port the app listens on
+numReplicas = 1

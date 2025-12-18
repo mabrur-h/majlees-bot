@@ -73,10 +73,12 @@ COPY supervisord.conf /etc/supervisord.conf
 ENV NODE_ENV=production
 ENV USE_LOCAL_BOT_API=true
 ENV LOCAL_BOT_API_URL=http://localhost:8081
+# Default port for webhook server (Railway/hosting platforms override via PORT env var)
+ENV PORT=3001
 
 # Expose ports
 # 8081 - Local Bot API
-# 3001 - Webhook server (if used)
+# 3001 - Webhook server (PORT env var)
 EXPOSE 8081 3001
 
 # Start both services using supervisor

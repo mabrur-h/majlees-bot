@@ -56,8 +56,8 @@ export function createWebhookServer(bot: Bot<BotContext>, port: number = 3001) {
     }
   });
 
-  app.listen(port, () => {
-    console.log("Webhook server running on port " + port);
+  app.listen(port, "0.0.0.0", () => {
+    console.log("Webhook server running on port " + port + " (0.0.0.0)");
   });
 
   return app;

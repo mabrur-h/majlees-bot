@@ -3,6 +3,13 @@ import { createWebhookServer } from "./webhook/server.js";
 import { config } from "./config.js";
 
 async function main(): Promise<void> {
+  console.log("=== Bot Starting ===");
+  console.log("PORT env:", process.env.PORT);
+  console.log("WEBHOOK_PORT env:", process.env.WEBHOOK_PORT);
+  console.log("Config webhookPort:", config.webhookPort);
+  console.log("WEBHOOK_SECRET configured:", !!config.webhookSecret);
+  console.log("====================");
+
   const bot = createBot();
   createWebhookServer(bot, config.webhookPort);
 
