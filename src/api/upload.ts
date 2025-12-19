@@ -391,6 +391,7 @@ class UploadService {
 
     const responseText = await uploadResponse.text();
     console.log("Upload response status:", uploadResponse.status);
+    console.log("Upload response body:", responseText);
 
     if (!uploadResponse.ok) {
       return this.parseUploadError(uploadResponse.status, responseText);
