@@ -86,7 +86,9 @@ export async function handleMedia(ctx: BotContext): Promise<void> {
   } else if (message.voice) {
     fileId = message.voice.file_id;
     fileSize = message.voice.file_size;
-    mimeType = message.voice.mime_type;
+    // Voice messages are always Ogg Opus, but Telegram may not provide mime_type
+    // or may provide "audio/ogg; codecs=opus" which doesn't match exactly
+    mimeType = "audio/ogg";
     duration = message.voice.duration;
     fileName = "voice_" + Date.now() + ".ogg";
   } else if (message.video_note) {
